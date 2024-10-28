@@ -24,42 +24,7 @@
 
 #include "main_helper.h"
 
-// defaults
-#define META_INODE_QUANTITY 16
-#define META_NODE_QUANTITY 16
-#define META_SIZE 2
-#define PAGE_SIZE 8
-#define INODE_NODE_LIM 8
-#define INODE_INODE_LIM 8
-#define FILE_NAME_LIM 16
-
-typedef struct inode {
-  uint8_t flags;
-  // uint8_t inode_q;
-  // array of offsets to inodes (basically pointers)
-  uint32_t inode_off[INODE_INODE_LIM];
-  // uint8_t node_q;
-  // array of offsets to nodes (basically pointers)
-  uint32_t node_off[INODE_NODE_LIM];
-  uint32_t parrent;
-  char name[FILE_NAME_LIM];
-} inode_t;
-
-typedef struct node {
-  uint8_t flags;
-  uint32_t parent;
-  char data[PAGE_SIZE];
-} node_t;
-
-#define INODE_SIZE sizeof(inode_t)
-#define NODE_SIZE sizeof(node_t)
-
-#define FILE_SIZE                                                              \
-  META_INODE_QUANTITY * sizeof(inode_t) + META_NODE_QUANTITY *NODE_SIZE
-
-#define DIR_FLAG 0b10000000
-#define FILE_FLAG 0b00000000
-#define NODE_USED_FLAG 0b00000001
+#include "defs.h"
 
 static int FILL_DIR_PLUS = 0;
 
@@ -146,7 +111,7 @@ static int create_new_node(int fd, int parrent_offset, const char *buf,
   }
 
   for (int i = 0; i < len; i++) {
-    new_node->data[i + file_start] = buf[buf_offset + i];
+    new_node->data[file_start + i] = buf[buf_offset + i];
   }
 
   pwrite(fd, new_node, NODE_SIZE, offset);
@@ -166,16 +131,23 @@ static int r_find_inode_by_path(int fd, inode_t *inode, char **path,
   inode_t *tmp_inode = malloc(INODE_SIZE);
   char *cur_path = path[cur];
   for (int i = 0; i < INODE_INODE_LIM; i++) {
+    if (inode->inode_off[i] == 0) {
+      continue;
+    }
     pread(fd, tmp_inode, INODE_SIZE, inode->inode_off[i]);
     if (strcmp(cur_path, tmp_inode->name) != 0) {
       continue;
     }
     if (path_len == cur + 1) {
+      free(tmp_inode);
       return inode->inode_off[i];
     } else {
-      return r_find_inode_by_path(fd, tmp_inode, path, path_len, cur + 1);
+      int _r = r_find_inode_by_path(fd, tmp_inode, path, path_len, cur + 1);
+      free(tmp_inode);
+      return _r;
     }
   }
+  free(tmp_inode);
   return -1;
 }
 
@@ -183,10 +155,14 @@ static int r_get_file_size(int fd, inode_t *inode) {
   int size = 0;
   node_t *node = malloc(NODE_SIZE);
   for (int i = 0; i < INODE_NODE_LIM; i++) {
-    pread(fd, node, NODE_SIZE, inode->node_off[i]);
-    if ((node->flags & NODE_USED_FLAG) != 0) {
-      size += strlen(node->data);
+    if (inode->node_off[i] == 0) {
+      break;
     }
+    pread(fd, node, NODE_SIZE, inode->node_off[i]);
+    if ((node->flags & NODE_USED_FLAG) == 0) {
+      break;
+    }
+    size += strlen(node->data);
   }
   free(node);
   return size;
@@ -224,6 +200,8 @@ static int r_getattr(const char *path, struct stat *stbuf,
   pread(fd, inode, INODE_SIZE, off);
 
   if ((inode->flags & NODE_USED_FLAG) == 0) {
+    free(inode);
+    close(fd);
     return -ENOENT;
   }
 
@@ -304,6 +282,9 @@ static int r_mkdir(const char *path, mode_t mode) {
   // find second to last dir in the path
   int offset = r_find_inode_by_path(fd, inode, dir_path, n - 1, 0);
   if (offset == -1) {
+    free(inode);
+    close(fd);
+    free(dir_path);
     return -ENFILE;
   }
 
@@ -319,11 +300,17 @@ static int r_mkdir(const char *path, mode_t mode) {
   }
 
   if (i == INODE_INODE_LIM) {
+    free(inode);
+    close(fd);
+    free(dir_path);
     return -ENFILE;
   }
 
   int child_offset = create_new_inode(dir_path[n - 1], fd, offset, DIR_FLAG);
   if (child_offset == -1) {
+    free(inode);
+    close(fd);
+    free(dir_path);
     return -ENFILE;
   }
   inode->inode_off[i] = child_offset;
@@ -332,6 +319,7 @@ static int r_mkdir(const char *path, mode_t mode) {
 
   close(fd);
   free(dir_path);
+  free(inode);
   return 0;
 }
 
@@ -376,6 +364,7 @@ static int r_unlink(const char *path) {
   close(fd);
   free(inode);
   free(node);
+  free(dir_path);
   return 0;
 }
 
@@ -393,12 +382,16 @@ static int r_rmdir(const char *path) {
   if (offset == -1) {
     free(dir_path);
     free(inode);
+    close(fd);
     return -ENFILE;
   }
   pread(fd, inode, INODE_SIZE, offset);
   inode->flags = inode->flags & (~NODE_USED_FLAG);
   for (int i = 0; i < INODE_INODE_LIM; i++) {
     if (inode->inode_off[i] != 0) {
+      free(dir_path);
+      free(inode);
+      close(fd);
       return -ENOTEMPTY;
     }
   }
@@ -415,6 +408,7 @@ static int r_rmdir(const char *path) {
 
   free(dir_path);
   free(inode);
+  close(fd);
   return 0;
 }
 
@@ -481,6 +475,9 @@ static int r_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
   // find second to last dir in the path
   int offset = r_find_inode_by_path(fd, inode, dir_path, n - 1, 0);
   if (offset == -1) {
+    free(inode);
+    free(dir_path);
+    close(fd);
     return -ENFILE;
   }
 
@@ -496,11 +493,17 @@ static int r_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
   }
 
   if (i == INODE_INODE_LIM) {
+    free(inode);
+    free(dir_path);
+    close(fd);
     return -ENFILE;
   }
 
   int child_offset = create_new_inode(dir_path[n - 1], fd, offset, FILE_FLAG);
   if (child_offset == -1) {
+    free(inode);
+    free(dir_path);
+    close(fd);
     return -ENFILE;
   }
   inode->inode_off[i] = child_offset;
@@ -509,6 +512,7 @@ static int r_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
 
   close(fd);
   free(dir_path);
+  free(inode);
   return 0;
 }
 
@@ -520,12 +524,16 @@ static int r_open(const char *path, struct fuse_file_info *fi) {
   read(fd, inode, INODE_SIZE);
   int offset = r_find_inode_by_path(fd, inode, dir_path, n, 0);
   if (offset == -1) {
+    free(inode);
+    free(dir_path);
+    close(fd);
     return -ENOENT;
   }
 
   free(dir_path);
   free(inode);
   close(fd);
+
   return 0;
 }
 
@@ -545,16 +553,26 @@ static int r_read(const char *path, char *buf, size_t size, off_t offset,
   // find second to last dir in the path
   int inode_offset = r_find_inode_by_path(fd, inode, dir_path, n, 0);
   if (inode_offset == -1) {
+    free(inode);
+    free(dir_path);
+    close(fd);
     return -ENFILE;
   }
 
   // read inode of second to last dir
   pread(fd, inode, INODE_SIZE, inode_offset);
 
-  int len = INODE_NODE_LIM * PAGE_SIZE - offset;
+  int len = r_get_file_size(fd, inode) - offset;
   if (len > size + offset) {
     len = size;
   }
+  if (len == 0) {
+    close(fd);
+    free(dir_path);
+    free(inode);
+    return 0;
+  }
+
   node_t *node = malloc(NODE_SIZE);
 
   int page = (int)(offset / PAGE_SIZE);
@@ -566,11 +584,18 @@ static int r_read(const char *path, char *buf, size_t size, off_t offset,
   for (int i = 0; i < len; i++) {
     buf[i] = node->data[cur_it];
     cur_it++;
-    if (cur_it == PAGE_SIZE) {
-      pread(fd, node, NODE_SIZE, inode->node_off[page]);
-      page++;
-      cur_it = 0;
+    if (cur_it != PAGE_SIZE) {
+      continue;
     }
+    if (inode->node_off[page] == 0) {
+      break;
+    }
+    pread(fd, node, NODE_SIZE, inode->node_off[page]);
+    if ((node->flags & NODE_USED_FLAG) == 0) {
+      break;
+    }
+    cur_it = 0;
+    page++;
   }
 
   close(fd);
@@ -594,12 +619,18 @@ static int r_write(const char *path, const char *buf, size_t size, off_t offset,
 
   int inode_offset = r_find_inode_by_path(fd, inode, dir_path, n, 0);
   if (inode_offset == -1) {
+    free(dir_path);
+    free(inode);
+    close(fd);
     return -ENFILE;
   }
 
   pread(fd, inode, INODE_SIZE, inode_offset);
 
   if ((inode->flags & DIR_FLAG) != 0) {
+    free(dir_path);
+    free(inode);
+    close(fd);
     return -EISDIR;
   }
 
@@ -611,13 +642,13 @@ static int r_write(const char *path, const char *buf, size_t size, off_t offset,
   node_t *node = malloc(NODE_SIZE);
 
   while (page < INODE_NODE_LIM && size > 0) {
-    int read_len = PAGE_SIZE - buf_off;
-    if (read_len > size) {
-      read_len = size;
+    int write_len = PAGE_SIZE - cur_off;
+    if (write_len > size) {
+      write_len = size;
     }
     if (inode->node_off[page] == 0) {
       int child_offset =
-          create_new_node(fd, inode_offset, buf, buf_off, cur_off, read_len);
+          create_new_node(fd, inode_offset, buf, buf_off, 0, write_len);
       if (child_offset == -1) {
         close(fd);
         free(dir_path);
@@ -629,16 +660,16 @@ static int r_write(const char *path, const char *buf, size_t size, off_t offset,
     } else {
       pread(fd, node, NODE_SIZE, inode->node_off[page]);
 
-      for (int i = 0; i < read_len; i++) {
-        node->data[i + cur_off] = buf[buf_off + i];
+      for (int i = 0; i < write_len; i++) {
+        node->data[cur_off + i] = buf[buf_off + i];
       }
 
       pwrite(fd, node, NODE_SIZE, inode->node_off[page]);
     }
-    buf_off += read_len;
+    buf_off += write_len;
     cur_off = 0;
-    size -= read_len;
-    n_read += read_len;
+    size -= write_len;
+    n_read += write_len;
     page++;
   }
 
@@ -653,7 +684,7 @@ static int r_write(const char *path, const char *buf, size_t size, off_t offset,
 
 static int r_release(const char *path, struct fuse_file_info *fi) {
   (void)path;
-  close(fi->fh);
+  (void)fi;
   return 0;
 }
 
@@ -673,13 +704,6 @@ static const struct fuse_operations r_oper = {
     .write = r_write,
     .release = r_release,
 };
-
-char *concat(const char *s1, const char *s2) {
-  char *result = malloc(strlen(s1) + strlen(s2) + 1);
-  strcpy(result, s1);
-  strcat(result, s2);
-  return result;
-}
 
 int main(int argc, char *argv[]) {
   umask(0);
