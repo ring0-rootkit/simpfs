@@ -3,10 +3,9 @@
 
 #include <stdint.h>
 #define META_INODE_QUANTITY 16
-#define META_NODE_QUANTITY 16
+#define META_NODE_QUANTITY 32
 #define META_SIZE 2
 #define PAGE_SIZE 1024
-#define INODE_NODE_LIM 16
 #define INODE_INODE_LIM 8
 #define FILE_NAME_LIM 64
 
@@ -17,14 +16,16 @@ typedef struct inode {
   uint32_t inode_off[INODE_INODE_LIM];
   // uint8_t node_q;
   // array of offsets to nodes (basically pointers)
-  uint32_t node_off[INODE_NODE_LIM];
+  uint32_t node_off;
   uint32_t parrent;
   char name[FILE_NAME_LIM + 1];
 } inode_t;
 
 typedef struct node {
   uint8_t flags;
-  uint32_t parent;
+  uint32_t next;
+  uint32_t prev;
+  uint32_t len;
   char data[PAGE_SIZE + 1];
 } node_t;
 

@@ -80,13 +80,12 @@ static int create_new_inode(char *name, int fd, int parrent_offset,
   return offset;
 }
 
-static int create_new_node(int fd, int parrent_offset, const char *buf,
-                           int buf_offset, int file_start, int data_size) {
+static int create_new_node(int fd, int parrent_offset) {
 
   node_t *new_node = malloc(NODE_SIZE);
   memset(new_node, '\0', NODE_SIZE);
   new_node->flags = NODE_USED_FLAG;
-  new_node->parent = parrent_offset;
+  new_node->prev = parrent_offset;
 
   inode_t *tmp_node = malloc(NODE_SIZE);
   int offset = META_INODE_QUANTITY * INODE_SIZE;
@@ -103,15 +102,6 @@ static int create_new_node(int fd, int parrent_offset, const char *buf,
     free(new_node);
     free(tmp_node);
     return -1;
-  }
-
-  int len = PAGE_SIZE;
-  if (data_size < len) {
-    len = data_size;
-  }
-
-  for (int i = 0; i < len; i++) {
-    new_node->data[file_start + i] = buf[buf_offset + i];
   }
 
   pwrite(fd, new_node, NODE_SIZE, offset);
@@ -154,15 +144,14 @@ static int r_find_inode_by_path(int fd, inode_t *inode, char **path,
 static int r_get_file_size(int fd, inode_t *inode) {
   int size = 0;
   node_t *node = malloc(NODE_SIZE);
-  for (int i = 0; i < INODE_NODE_LIM; i++) {
-    if (inode->node_off[i] == 0) {
-      break;
-    }
-    pread(fd, node, NODE_SIZE, inode->node_off[i]);
+  pread(fd, node, NODE_SIZE, inode->node_off);
+  size += node->len;
+  while (node->next != 0) {
+    pread(fd, node, NODE_SIZE, node->next);
     if ((node->flags & NODE_USED_FLAG) == 0) {
       break;
     }
-    size += strlen(node->data);
+    size += node->len;
   }
   free(node);
   return size;
@@ -340,13 +329,20 @@ static int r_unlink(const char *path) {
   pwrite(fd, inode, INODE_SIZE, child_offset);
 
   node_t *node = malloc(NODE_SIZE);
-  for (int i = 0; i < INODE_NODE_LIM; i++) {
-    if (inode->node_off[i] == 0) {
-      continue;
-    }
-    pread(fd, node, NODE_SIZE, inode->node_off[i]);
+  if (inode->node_off != 0) {
+    pread(fd, node, NODE_SIZE, inode->node_off);
     node->flags = 0;
-    pwrite(fd, node, NODE_SIZE, inode->node_off[i]);
+    pwrite(fd, node, NODE_SIZE, inode->node_off);
+
+    do {
+      int off = node->next;
+      if (off == 0) {
+        break;
+      }
+      pread(fd, node, NODE_SIZE, off);
+      node->flags = 0;
+      pwrite(fd, node, NODE_SIZE, off);
+    } while (node->next != 0);
   }
 
   int parrent = inode->parrent;
@@ -578,8 +574,10 @@ static int r_read(const char *path, char *buf, size_t size, off_t offset,
   int page = (int)(offset / PAGE_SIZE);
   int cur_it = offset - page * PAGE_SIZE;
 
-  pread(fd, node, NODE_SIZE, inode->node_off[page]);
-  page++;
+  pread(fd, node, NODE_SIZE, inode->node_off);
+  for (int i = 0; i < page; i++) {
+    pread(fd, node, NODE_SIZE, node->next);
+  }
 
   for (int i = 0; i < len; i++) {
     buf[i] = node->data[cur_it];
@@ -587,15 +585,14 @@ static int r_read(const char *path, char *buf, size_t size, off_t offset,
     if (cur_it != PAGE_SIZE) {
       continue;
     }
-    if (inode->node_off[page] == 0) {
+    if (node->next == 0) {
       break;
     }
-    pread(fd, node, NODE_SIZE, inode->node_off[page]);
+    pread(fd, node, NODE_SIZE, node->next);
     if ((node->flags & NODE_USED_FLAG) == 0) {
       break;
     }
     cur_it = 0;
-    page++;
   }
 
   close(fd);
@@ -638,17 +635,41 @@ static int r_write(const char *path, const char *buf, size_t size, off_t offset,
   int cur_off = offset - (page * PAGE_SIZE);
   int buf_off = 0;
   int n_read = 0;
+  int cur_node_off = 0;
 
   node_t *node = malloc(NODE_SIZE);
+  cur_node_off = inode->node_off;
+  if (cur_node_off != 0) {
+    pread(fd, node, NODE_SIZE, cur_node_off);
+    for (int i = 0; i < page; i++) {
+      cur_node_off = node->next;
+      pread(fd, node, NODE_SIZE, cur_node_off);
+    }
+  }
 
-  while (page < INODE_NODE_LIM && size > 0) {
+  if (cur_node_off == 0) {
+    int child_offset = create_new_node(fd, inode_offset);
+    if (child_offset == -1) {
+      close(fd);
+      free(dir_path);
+      free(inode);
+      free(node);
+      return -ENFILE;
+    }
+    inode->node_off = child_offset;
+    cur_node_off = child_offset;
+    pread(fd, node, NODE_SIZE, cur_node_off);
+  }
+
+  pwrite(fd, inode, INODE_SIZE, inode_offset);
+
+  while (size > 0) {
     int write_len = PAGE_SIZE - cur_off;
     if (write_len > size) {
       write_len = size;
     }
-    if (inode->node_off[page] == 0) {
-      int child_offset =
-          create_new_node(fd, inode_offset, buf, buf_off, 0, write_len);
+    if (node->next == 0) {
+      int child_offset = create_new_node(fd, cur_node_off);
       if (child_offset == -1) {
         close(fd);
         free(dir_path);
@@ -656,24 +677,26 @@ static int r_write(const char *path, const char *buf, size_t size, off_t offset,
         free(node);
         return -ENFILE;
       }
-      inode->node_off[page] = child_offset;
-    } else {
-      pread(fd, node, NODE_SIZE, inode->node_off[page]);
-
-      for (int i = 0; i < write_len; i++) {
-        node->data[cur_off + i] = buf[buf_off + i];
-      }
-
-      pwrite(fd, node, NODE_SIZE, inode->node_off[page]);
+      node->next = child_offset;
     }
+
+    for (int i = 0; i < write_len; i++) {
+      node->data[cur_off + i] = buf[buf_off + i];
+    }
+    node->len = write_len;
+
+    pwrite(fd, node, NODE_SIZE, cur_node_off);
+
     buf_off += write_len;
     cur_off = 0;
     size -= write_len;
     n_read += write_len;
+
+    cur_node_off = node->next;
+    pread(fd, node, NODE_SIZE, cur_node_off);
+
     page++;
   }
-
-  pwrite(fd, inode, INODE_SIZE, inode_offset);
 
   close(fd);
   free(dir_path);

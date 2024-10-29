@@ -1,7 +1,4 @@
 #include "main_helper.h"
-#include "defs.h"
-#include <stdlib.h>
-#include <string.h>
 int num_of_chars(const char *str, const char c) {
   int counter = 0;
   int len = strlen(str);

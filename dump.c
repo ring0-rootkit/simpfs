@@ -29,12 +29,7 @@ void print_inode(inode_t *inode, int offset) {
   }
   printf("\n");
   printf("nodes:");
-  for (int i = 0; i < INODE_NODE_LIM; i++) {
-    int id = inode->node_off[i];
-    if (id == 0)
-      continue;
-    printf(" %d ", id);
-  }
+  printf(" %d ", inode->node_off);
   printf("\n");
   printf("\n\n");
 }
@@ -45,8 +40,9 @@ void print_node(node_t *node, int offset) {
 
   printf("\tnode:\n");
   printf("id:%d\n", offset);
-  printf("parent:%d\n", node->parent);
-  printf("data (%ld bytes):\n", strlen(node->data));
+  printf("next:%d\n", node->next);
+  printf("parent:%d\n", node->prev);
+  printf("data (%d bytes):\n", node->len);
   if (SHOW_NODE_DATA) {
     printf("===[START]===\n");
     printf("%s\n", node->data);
