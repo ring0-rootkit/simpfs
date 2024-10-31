@@ -1,6 +1,6 @@
 # simpfs
 
-Simple user space filesystem implemented with (libFUSE)[https://github.com/libfuse/libfuse]
+Simple user space filesystem implemented with [libFUSE](https://github.com/libfuse/libfuse)
 
 File system stores all data in `data` file alongsied folder it is mounted in.
 
@@ -9,8 +9,8 @@ File system stores all data in `data` file alongsied folder it is mounted in.
 ## Compile and run
 
 To compile source code you will need all dependencies from 
-(libFUSE)[https://github.com/libfuse/libfuse] repo
-or you can use prebuilt binaries that you can find in (releases)[https://github.com/ring0-rootkit/simpfs/releases/tag/1.0]
+[libFUSE](https://github.com/libfuse/libfuse) repo
+or you can use prebuilt binaries that you can find in [releases](https://github.com/ring0-rootkit/simpfs/releases/tag/1.0)
 
 ```bash
 mkdir fs // directory where file system will be mounted
