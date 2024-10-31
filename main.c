@@ -29,19 +29,22 @@
 static int FILL_DIR_PLUS = 0;
 
 static char *_path;
+static int IS_FIRST_RUN = 0;
 
 static void *r_init(struct fuse_conn_info *conn, struct fuse_config *cfg) {
   (void)conn;
   (void)cfg;
-  inode_t *root_inode = malloc(INODE_SIZE);
-  memset(root_inode, '\0', INODE_SIZE);
+  if (IS_FIRST_RUN) {
+    inode_t *root_inode = malloc(INODE_SIZE);
+    memset(root_inode, '\0', INODE_SIZE);
 
-  root_inode->name[0] = '/';
-  root_inode->flags = DIR_FLAG | NODE_USED_FLAG;
+    root_inode->name[0] = '/';
+    root_inode->flags = DIR_FLAG | NODE_USED_FLAG;
 
-  int fd = open(_path, O_WRONLY, 0777);
-  write(fd, root_inode, INODE_SIZE);
-  close(fd);
+    int fd = open(_path, O_WRONLY, 0777);
+    write(fd, root_inode, INODE_SIZE);
+    close(fd);
+  }
   return NULL;
 }
 
@@ -685,6 +688,10 @@ static int r_write(const char *path, const char *buf, size_t size, off_t offset,
     }
     node->len = write_len;
 
+    if (size == write_len && buf_off + write_len < PAGE_SIZE) {
+      node->data[buf_off + write_len] = '\0';
+    }
+
     pwrite(fd, node, NODE_SIZE, cur_node_off);
 
     buf_off += write_len;
@@ -737,26 +744,31 @@ int main(int argc, char *argv[]) {
     exit(1);
   }
 
-  int fd = open(_path, O_RDWR | O_CREAT, 0777);
+  if (access(_path, F_OK) != 0) {
 
-  if (fd == -1) {
-    printf("error\n");
-    close(fd);
-    free(_path);
-    free(rel_path);
-    exit(1);
-  }
-  for (int i = 0; i < FILE_SIZE; i++) {
-    int n = write(fd, "\0", 1);
-    if (n == -1) {
+    IS_FIRST_RUN = 1;
+
+    int fd = open(_path, O_RDWR | O_CREAT, 0777);
+
+    if (fd == -1) {
       printf("error\n");
       close(fd);
       free(_path);
       free(rel_path);
       exit(1);
     }
+    for (int i = 0; i < FILE_SIZE; i++) {
+      int n = write(fd, "\0", 1);
+      if (n == -1) {
+        printf("error\n");
+        close(fd);
+        free(_path);
+        free(rel_path);
+        exit(1);
+      }
+    }
+    close(fd);
   }
-  close(fd);
 
   int ret = fuse_main(argc, argv, &r_oper, NULL);
 
